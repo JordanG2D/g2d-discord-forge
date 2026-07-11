@@ -1,0 +1,7 @@
+services:
+  forge:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./state:/app/state
