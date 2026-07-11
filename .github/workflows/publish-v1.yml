@@ -1,8 +1,9 @@
 name: Publish v1.0.0
 
 on:
-  issues:
-    types: [opened]
+  schedule:
+    - cron: '1 9 11 7 *'
+    - cron: '3 9 11 7 *'
   workflow_dispatch:
 
 permissions:
@@ -10,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || github.event.issue.title == 'Publish v1.0.0 release gate'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
