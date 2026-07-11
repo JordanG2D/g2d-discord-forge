@@ -1,0 +1,64 @@
+name: Scheduled Publish v1.0.0
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Reassemble and verify source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src/guild_forge tests
+          cat .release/core.part* > src/guild_forge/core.py
+          cat .release/engine.part* > src/guild_forge/engine.py
+          cat .release/test_core.part* > tests/test_core.py
+          cat .release/test_engine.part* > tests/test_engine.py
+          cp .release/tests.yml .github/workflows/tests.yml
+          echo "2f53633c1721aa2cd88281a34bb194c349a4213949cfe1f143ccb1c52e2a249f  src/guild_forge/core.py" | sha256sum -c -
+          echo "f8de703e895c7e227eef5e70aaf12ad3012116cc3bf3fddb0ba226f7d52ec960  src/guild_forge/engine.py" | sha256sum -c -
+          echo "0437d4429ed24d75db0f79fda0fe11d3762db365176ceefc9297f4d9d9e1a527  tests/test_core.py" | sha256sum -c -
+          echo "3830dbe9ca4225c3fc331fa8e7f8d424b6846fc53e771e387b11307963904fbf  tests/test_engine.py" | sha256sum -c -
+          echo "52a78100504d557868ef14218668baf32bf7590ad422b9904408f20c4f5e2025  LICENSE" | sha256sum -c -
+          test ! -e .env
+          if find . -path './.git' -prune -o -type f \( -path '*/state/*.json' -o -path '*/runtime/*.json' \) -print | grep -q .; then
+            echo "Runtime state JSON found" >&2
+            exit 1
+          fi
+      - name: Run tests
+        run: |
+          python -m pip install -e .
+          PYTHONPATH=src:tests python -m unittest discover -s tests -v
+      - name: Finalize main and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .release
+          rm -f .github/workflows/publish-v1.yml
+          rm -f .github/workflows/scheduled-release-v1.yml
+          git clean -fdX
+          test ! -e .env
+          if find . -path './.git' -prune -o -type f \( -path '*/state/*.json' -o -path '*/runtime/*.json' \) -print | grep -q .; then
+            echo "Runtime state JSON found" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release v1.0.0"
+          git tag -a v1.0.0 -m "v1.0.0"
+          git push origin HEAD:main
+          git push origin v1.0.0
