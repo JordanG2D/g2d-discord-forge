@@ -1,0 +1,117 @@
+]]:
+    channel_type = _int_or(channel.get("type"), -1)
+    if channel_type not in SUPPORTED_CHANNEL_TYPES:
+        raise ValueError(f"Unsupported channel type: {channel_type}")
+
+    warnings: list[str] = []
+    payload: dict[str, Any] = {"name": str(channel.get("name", "new-channel"))[:100]}
+    if include_type:
+        payload["type"] = channel_type
+
+    parent_source_id = channel.get("_parent_source_id")
+    if parent_source_id is not None:
+        parent_target_id = channel_map.get(sid(parent_source_id))
+        if parent_target_id is None:
+            raise ValueError(
+                f"Parent category {parent_source_id} has not been provisioned for channel {channel.get('name')}."
+            )
+        payload["parent_id"] = parent_target_id
+    elif channel_type != 4:
+        payload["parent_id"] = None
+
+    mapped_overwrites, overwrite_warnings = map_permission_overwrites(
+        channel.get("permission_overwrites", []), role_map=role_map
+    )
+    warnings.extend(overwrite_warnings)
+    payload["permission_overwrites"] = mapped_overwrites
+
+    if channel_type in {0, 5, 15, 16}:
+        _copy_non_null(payload, channel, "topic", "nsfw", "rate_limit_per_user", "default_auto_archive_duration")
+
+    if channel_type in {2, 13}:
+        bitrate = _int_or(channel.get("bitrate"), 64000)
+        bitrate_cap = 64000 if channel_type == 13 else 96000
+        if bitrate > bitrate_cap:
+            warnings.append(
+                f"Channel '{channel.get('name')}' bitrate {bitrate} was capped to {bitrate_cap} for target compatibility."
+            )
+            bitrate = bitrate_cap
+        payload["bitrate"] = max(8000, bitrate)
+        payload["user_limit"] = max(0, _int_or(channel.get("user_limit"), 0))
+        _copy_non_null(payload, channel, "rtc_region", "video_quality_mode", "nsfw", "rate_limit_per_user")
+
+    if channel_type in {15, 16}:
+        tags = channel.get("available_tags")
+        if isinstance(tags, list):
+            payload["available_tags"] = [_sanitize_forum_tag(tag) for tag in tags if isinstance(tag, dict)]
+        reaction = channel.get("default_reaction_emoji")
+        if isinstance(reaction, dict):
+            if reaction.get("emoji_id"):
+                warnings.append(
+                    f"Channel '{channel.get('name')}' uses a source-server custom default reaction; it was omitted."
+                )
+            elif reaction.get("emoji_name"):
+                payload["default_reaction_emoji"] = {
+                    "emoji_id": None,
+                    "emoji_name": reaction.get("emoji_name"),
+                }
+        _copy_non_null(
+            payload,
+            channel,
+            "default_sort_order",
+            "default_thread_rate_limit_per_user",
+        )
+        if channel_type == 15:
+            _copy_non_null(payload, channel, "default_forum_layout")
+
+    return payload, warnings
+
+
+def map_permission_overwrites(
+    overwrites: Any,
+    *,
+    role_map: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not isinstance(overwrites, list):
+        return [], []
+
+    mapped: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for overwrite in overwrites:
+        if not isinstance(overwrite, dict):
+            continue
+        overwrite_type = _int_or(overwrite.get("type"), 0)
+        source_target_id = sid(overwrite.get("id"))
+        if overwrite_type != 0:
+            raise ValueError(
+                f"Template contains a member-specific permission overwrite for source id {source_target_id}; "
+                "member identities are not portable between servers."
+            )
+        target_id = role_map.get(source_target_id)
+        if target_id is None:
+            raise ValueError(
+                f"No target role mapping exists for permission overwrite source role {source_target_id}."
+            )
+        mapped.append(
+            {
+                "id": target_id,
+                "type": 0,
+                "allow": str(_int_or(overwrite.get("allow"), 0)),
+                "deny": str(_int_or(overwrite.get("deny"), 0)),
+            }
+        )
+    return mapped, warnings
+
+
+def normalize_overwrites(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for overwrite in value:
+        if not isinstance(overwrite, dict):
+            continue
+        normalized.append(
+            {
+                "id": sid(overwrite.get("id")),
+                "type": _int_or(overwrite.get("type"), 0),
+       

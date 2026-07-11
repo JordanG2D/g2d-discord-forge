@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Any
+from urllib.parse import quote, urlencode
+
+from .api import DiscordAPI, DiscordAPIError
+from .config import Settings
+from .core import (
+    approval_code,
+    build_plan,
+    channel_creation_order,
+    channel_payload,
+    channel_type_name,
+    effective_guild_permissions,
+    has_required_permissions,
+    is_everyone_role,
+    normalize_overwrites,
+    role_payload,
+    role_sort_bottom_to_top,
+    role_sort_top_to_bottom,
+    sid,
+    source_channels,
+    source_roles,
+    template_guild,
+)
+from .state import (
+    archive_state,
+    initial_state,
+    load_json,
+    save_json_atomic,
+    utc_now,
+    validate_state_binding,
+)
+
+
+class ForgeError(RuntimeError):
+    pass
+
+
+def make_api(settings: Settings) -> DiscordAPI:
+    return DiscordAPI(
+        base_url=settings.api_base,
+        token=settings.bot_token,
+        timeout=settings.request_timeout,
+        audit_reason=settings.audit_reason,
+    )
+
+
+def fetch_template(api: DiscordAPI, template_code: str) -> dict[str, Any]:
+    payload = api.get(f"/guilds/templates/{quote(template_code, safe='')}", auth=False)
+    if not isinstance(payload, dict):
+        raise ForgeError("Discord returned an invalid guild template response.")
+    return payload
+
+
+def fetch_target_snapshot(
+    api: DiscordAPI,
+    guild_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    guild = api.get(f"/guilds/{guild_id}")
+    roles = api.get(f"/guilds/{guild_id}/roles")
+    channels = api.get(f"/guilds/{guild_id}/channels")
+    if not isinstance(guild, dict) or not isinstance(roles, list) or not isinstance(channels, list):
+        raise ForgeError("Discord returned an invalid target server snapshot.")
+    return guild, roles, channels
+
+
+def inspect_template(settings: Settings) -> dict[str, Any]:
+    api = make_api(settings)
+    template = fetch_template(api, settings.template_code)
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    output = settings.state_dir / f"template-{settings.template_code}.json"
+    save_json_atomic(output, template)
+    return {
+        "template": template,
+        "output": output,
+        "summary": template_summary(template),
+    }
+
+
+def template_summary(template: dict[str, Any]) -> dict[str, Any]:
+    guild = template_guild(template)
+    roles = source_roles(template)
+    channels = source_channels(template)
+    by_type: dict[str, int] = {}
+    for channel in channels:
+        label = channel_type_name(channel.get("type"))
+        by_type[label] = by_type.get(label, 0) + 1
+    return {
+        "code": sid(template.get("code")),
+        "template_name": template.get("name"),
+        "source_server_name": guild.get("name"),
+        "updated_at": template.get("updated_at"),
+        "roles": len(roles),
+        "channels": len(channels),
+        "channels_by_type": dict(sorted(by_type.items())),
+    }
+
+
+def generate_invite_url(settings: Settings) -> str:
+    application_id = settings.application_id
+    if not application_id:
+        settings.require_token()
+        api = make_api(settings)
+        application = api.get("/applications/@me")
+        if not isinstance(application, dict) or not application.get("id"):
+            raise ForgeError("Discord did not return an application ID for this bot token.")
+        application_id = sid(application["id"])
+
+    params: dict[str, str] = {
+        "client_id": application_id,
+        "permissions": "8",  # Temporary Administrator; needed to faithfully copy arbitrary overwrites.
+        "scope": "bot",
+    }
+    if settings.target_guild_id:
+        params["guild_id"] = settings.target_guild_id
+        params["disable_guild_select"] = "true"
+    return f"https://discord.com/oauth2/authorize?{urlencode(params)}"
+
+
+def create_plan(settings: Settings, *, save: bool = True) -> dict[str, Any]:
+    token = settings.require_token()
+    del token  # Validation only; API reads it from Settings.
+    guild_id = settings.require_guild_id()
+    api = make_api(settings)
+    template = fetch_template(api, settings.template_code)
+    guild, roles, channels = fetch_target_snapshot(api, guild_id)
+    state = load_json(settings.state_file)
+    validate_state_binding(state, template_code=settings.template_code, guild_id=guild_id)
+
+    plan = build_plan(
+        template=template,
+        guild=guild,
+        target_roles=roles,
+        target_channels=channels,
+        state=state,
+        adopt_existing=settings.ad

@@ -1,0 +1,13 @@
+name: Tests (release staging)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Release staging commit"

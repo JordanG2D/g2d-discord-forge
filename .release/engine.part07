@@ -1,0 +1,122 @@
+red_children = sorted(
+            children,
+            key=lambda item: (
+                int(item.get("_source_position", 0)),
+                int(item.get("_source_index", 0)),
+            ),
+        )
+        for position, channel in enumerate(ordered_children):
+            target_id = channel_map.get(channel["_source_id"])
+            if target_id is not None:
+                payload.append({"id": target_id, "position": position})
+
+    if payload:
+        api.patch(f"/guilds/{guild_id}/channels", payload)
+
+def _compare_owned_channel(
+    channel_name: Any,
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+    drift: list[str],
+) -> None:
+    numeric_keys = {
+        "bitrate",
+        "user_limit",
+        "rate_limit_per_user",
+        "default_auto_archive_duration",
+        "video_quality_mode",
+        "default_sort_order",
+        "default_forum_layout",
+        "default_thread_rate_limit_per_user",
+    }
+    for key, expected_value in expected.items():
+        if key == "permission_overwrites":
+            actual_value = normalize_overwrites(actual.get(key))
+            expected_normalized = normalize_overwrites(expected_value)
+            if actual_value != expected_normalized:
+                drift.append(f"Owned channel '{channel_name}' permission overwrites drifted.")
+            continue
+        if key == "available_tags":
+            expected_tags = _normalize_tags(expected_value)
+            actual_tags = _normalize_tags(actual.get(key))
+            if expected_tags != actual_tags:
+                drift.append(f"Owned channel '{channel_name}' forum/media tags drifted.")
+            continue
+        actual_value = actual.get(key)
+        if key in numeric_keys:
+            try:
+                actual_value = int(actual_value)
+            except (TypeError, ValueError):
+                pass
+        if key == "parent_id":
+            actual_value = None if actual_value is None else sid(actual_value)
+            expected_value = None if expected_value is None else sid(expected_value)
+        if actual_value != expected_value:
+            drift.append(
+                f"Owned channel '{channel_name}' field {key} drifted: expected {expected_value!r}, got {actual_value!r}."
+            )
+
+
+def _normalize_tags(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for tag in value:
+        if not isinstance(tag, dict):
+            continue
+        result.append(
+            {
+                "name": tag.get("name"),
+                "moderated": bool(tag.get("moderated", False)),
+                "emoji_name": tag.get("emoji_name"),
+            }
+        )
+    return sorted(result, key=lambda item: str(item["name"]))
+
+
+def _restore_baseline_role_positions(
+    api: DiscordAPI,
+    guild_id: str,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    baseline = state.get("baseline", {}).get("roles", {})
+    if not isinstance(baseline, dict) or not baseline:
+        return
+    current = api.get(f"/guilds/{guild_id}/roles")
+    if not isinstance(current, list):
+        warnings.append("Could not restore baseline role positions: invalid role snapshot.")
+        return
+    current_ids = {sid(role.get("id")) for role in current}
+    payload: list[dict[str, Any]] = []
+    for role_id, item in baseline.items():
+        if role_id == sid(guild_id) or role_id not in current_ids or not isinstance(item, dict):
+            continue
+        if bool(item.get("managed", False)):
+            continue
+        payload.append({"id": role_id, "position": int(item.get("position", 0))})
+    if payload:
+        api.patch(f"/guilds/{guild_id}/roles", payload)
+
+
+def _restore_baseline_channel_positions(
+    api: DiscordAPI,
+    guild_id: str,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    baseline = state.get("baseline", {}).get("channels", {})
+    if not isinstance(baseline, dict) or not baseline:
+        return
+    current = api.get(f"/guilds/{guild_id}/channels")
+    if not isinstance(current, list):
+        warnings.append("Could not restore baseline channel positions: invalid channel snapshot.")
+        return
+    current_ids = {sid(channel.get("id")) for channel in current}
+    payload: list[dict[str, Any]] = []
+    for channel_id, item in baseline.items():
+        if channel_id not in current_ids or not isinstance(item, dict):
+            continue
+        entry: dict[str, Any] = {
+            "id": channel_id,
+            "position":

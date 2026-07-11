@@ -1,0 +1,91 @@
+ate)
+
+    role_sources = {role["_source_id"]: role for role in source_roles(template)}
+    channel_sources = {channel["_source_id"]: channel for channel in source_channels(template)}
+    role_entries = {entry["source_id"]: deepcopy(entry) for entry in plan["roles"]}
+    channel_entries = {entry["source_id"]: deepcopy(entry) for entry in plan["channels"]}
+
+    # Persist all non-create mappings first so a partial run can be resumed safely.
+    for entry in plan["roles"]:
+        if entry.get("target_id") is None:
+            continue
+        prior = state["roles"].get(entry["source_id"], {})
+        state["roles"][entry["source_id"]] = {
+            **(prior if isinstance(prior, dict) else {}),
+            **_state_mapping(entry),
+        }
+    for entry in plan["channels"]:
+        if entry.get("target_id") is None:
+            continue
+        prior = state["channels"].get(entry["source_id"], {})
+        state["channels"][entry["source_id"]] = {
+            **(prior if isinstance(prior, dict) else {}),
+            **_state_mapping(entry),
+        }
+    save_json_atomic(settings.state_file, state)
+
+    try:
+        creation_sequence = _next_creation_sequence(state)
+
+        # Create top-to-bottom so Discord's bottom insertion keeps the template's internal order.
+        for role in role_sort_top_to_bottom(role_sources.values()):
+            source_id = role["_source_id"]
+            entry = role_entries[source_id]
+            if is_everyone_role(role):
+                continue
+            if entry["action"] == "create":
+                created = api.post(f"/guilds/{guild_id}/roles", role_payload(role))
+                if not isinstance(created, dict) or not created.get("id"):
+                    raise ForgeError(f"Discord did not return a created role for '{role.get('name')}'.")
+                target_id = sid(created["id"])
+                entry.update(target_id=target_id, action="managed", owned=True)
+                state["roles"][source_id] = {
+                    **_state_mapping(entry),
+                    "created_at": utc_now(),
+                    "created_sequence": creation_sequence,
+                }
+                creation_sequence += 1
+                run["created_roles"].append({"id": target_id, "name": role.get("name")})
+                save_json_atomic(settings.state_file, state)
+            elif entry["action"] == "managed" and entry.get("owned"):
+                target_id = sid(entry["target_id"])
+                updated = api.patch(f"/guilds/{guild_id}/roles/{target_id}", role_payload(role))
+                if not isinstance(updated, dict):
+                    raise ForgeError(f"Discord did not return the updated role '{role.get('name')}'.")
+                run["updated_roles"].append({"id": target_id, "name": role.get("name")})
+
+        role_map = {
+            source_id: sid(mapping["target_id"])
+            for source_id, mapping in state["roles"].items()
+            if isinstance(mapping, dict) and mapping.get("target_id") is not None
+        }
+        # Make absolutely sure @everyone maps even if an old state file omitted it.
+        for role in role_sources.values():
+            if is_everyone_role(role):
+                role_map[role["_source_id"]] = guild_id
+
+        _place_template_roles_below_bot(api, guild_id, role_sources, state)
+
+        # Preload channel map with adopted/managed resources, then create categories before children.
+        channel_map = {
+            source_id: sid(mapping["target_id"])
+            for source_id, mapping in state["channels"].items()
+            if isinstance(mapping, dict) and mapping.get("target_id") is not None
+        }
+
+        for channel in channel_creation_order(channel_sources.values()):
+            source_id = channel["_source_id"]
+            entry = channel_entries[source_id]
+            if entry["action"] == "create":
+                payload, payload_warnings = channel_payload(
+                    channel,
+                    role_map=role_map,
+                    channel_map=channel_map,
+                    include_type=True,
+                )
+                run["warnings"].extend(payload_warnings)
+                created = api.post(f"/guilds/{guild_id}/channels", payload)
+                if not isinstance(created, dict) or not created.get("id"):
+                    raise ForgeError(f"Discord did not return a created channel for '{channel.get('name')}'.")
+                target_id = sid(created["id"])
+                channel_map[source_id]

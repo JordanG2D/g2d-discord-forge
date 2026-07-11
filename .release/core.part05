@@ -1,0 +1,100 @@
+         "allow": str(_int_or(overwrite.get("allow"), 0)),
+                "deny": str(_int_or(overwrite.get("deny"), 0)),
+            }
+        )
+    return sorted(normalized, key=lambda item: (item["type"], item["id"]))
+
+
+def plan_as_json(plan: dict[str, Any]) -> str:
+    return json.dumps(plan, indent=2, sort_keys=True) + "\n"
+
+
+def _base_role_entry(role: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_id": role["_source_id"],
+        "source_index": _int_or(role.get("_source_index"), 0),
+        "source_position": _int_or(role.get("_source_position"), 0),
+        "name": role.get("name"),
+        "action": None,
+        "target_id": None,
+        "owned": False,
+        "reason": None,
+    }
+
+
+def _base_channel_entry(channel: dict[str, Any]) -> dict[str, Any]:
+    channel_type = _int_or(channel.get("type"), -1)
+    return {
+        "source_id": channel["_source_id"],
+        "source_index": _int_or(channel.get("_source_index"), 0),
+        "source_position": _int_or(channel.get("_source_position"), 0),
+        "parent_source_id": channel.get("_parent_source_id"),
+        "name": channel.get("name"),
+        "type": channel_type,
+        "type_name": channel_type_name(channel_type),
+        "action": None,
+        "target_id": None,
+        "owned": False,
+        "reason": None,
+    }
+
+
+def _role_setting_differences(source: dict[str, Any], target: dict[str, Any]) -> list[str]:
+    expected = role_payload(source)
+    differences: list[str] = []
+    for key in ("permissions", "color", "hoist", "mentionable"):
+        actual = target.get(key)
+        if key == "permissions":
+            actual = str(_int_or(actual, 0))
+        if actual != expected[key]:
+            differences.append(key)
+    return differences
+
+
+def _source_parent_label(parent_source_id: str | None, source_by_id: dict[str, dict[str, Any]]) -> str:
+    if parent_source_id is None:
+        return "the server root"
+    parent = source_by_id.get(parent_source_id)
+    if parent is None:
+        return f"source parent {parent_source_id}"
+    return f"category '{parent.get('name')}'"
+
+
+def _channel_sort_key(channel: dict[str, Any]) -> tuple[int, int]:
+    return (
+        _int_or(channel.get("_source_position"), 0),
+        _int_or(channel.get("_source_index"), 0),
+    )
+
+
+def _count_action(entries: Iterable[dict[str, Any]], action: str) -> int:
+    return sum(1 for entry in entries if entry.get("action") == action)
+
+
+def _count_actions(entries: Iterable[dict[str, Any]], actions: set[str]) -> int:
+    return sum(1 for entry in entries if entry.get("action") in actions)
+
+
+def _copy_non_null(target: dict[str, Any], source: dict[str, Any], *keys: str) -> None:
+    for key in keys:
+        if key in source and source[key] is not None:
+            target[key] = source[key]
+
+
+def _sanitize_forum_tag(tag: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "name": str(tag.get("name", "tag"))[:20],
+        "moderated": bool(tag.get("moderated", False)),
+    }
+    if tag.get("emoji_name"):
+        result["emoji_name"] = tag.get("emoji_name")
+        result["emoji_id"] = None
+    # Custom emoji IDs belong to the source guild and cannot be copied safely.
+    return result
+
+
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default

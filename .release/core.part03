@@ -1,0 +1,120 @@
+ent_label = _source_parent_label(parent_source_id, source_by_id)
+            conflicts.append(
+                f"Channel '{name}' under {parent_label} has {len(candidates)} exact matches; Forge will not guess."
+            )
+            entry.update(action="conflict", target_id=None, owned=False, reason="ambiguous exact matches")
+            channel_resolution[source_id] = None
+        else:
+            entry.update(action="create", target_id=None, owned=True, reason="missing from target")
+            channel_resolution[source_id] = None
+        channel_entries.append(entry)
+
+    mapped_role_targets = {
+        sid(entry["target_id"])
+        for entry in role_entries
+        if entry.get("target_id") is not None
+    }
+    mapped_channel_targets = {
+        sid(entry["target_id"])
+        for entry in channel_entries
+        if entry.get("target_id") is not None
+    }
+
+    extra_roles = [
+        {
+            "id": sid(role.get("id")),
+            "name": role.get("name"),
+            "managed": bool(role.get("managed", False)),
+        }
+        for role in target_roles
+        if sid(role.get("id")) not in mapped_role_targets and sid(role.get("id")) != guild_id
+    ]
+    extra_channels = [
+        {
+            "id": sid(channel.get("id")),
+            "name": channel.get("name"),
+            "type": _int_or(channel.get("type"), -1),
+            "type_name": channel_type_name(channel.get("type")),
+        }
+        for channel in target_channels
+        if sid(channel.get("id")) not in mapped_channel_targets
+    ]
+
+    if any(entry.get("action") == "reuse" for entry in role_entries):
+        warnings.append(
+            "Mapped template roles are placed as a contiguous hierarchy directly below the Forge bot role; "
+            "adopted role settings are preserved."
+        )
+
+    if any(entry.get("action") == "reuse" for entry in channel_entries):
+        warnings.append(
+            "Adopted channels/categories keep their existing settings and message history; "
+            "Forge only repositions them when FORGE_PLACEMENT=top."
+        )
+
+    apply_code = approval_code("APPLY", sid(template.get("code")), guild_id)
+    rollback_code = approval_code("ROLLBACK", sid(template.get("code")), guild_id)
+
+    return {
+        "version": 1,
+        "template": {
+            "code": sid(template.get("code")),
+            "name": template.get("name"),
+            "description": template.get("description"),
+            "updated_at": template.get("updated_at"),
+            "source_guild_id": sid(template.get("source_guild_id")),
+            "source_guild_name": template_guild(template).get("name"),
+        },
+        "target": {
+            "id": guild_id,
+            "name": guild.get("name"),
+        },
+        "settings": {
+            "adopt_existing": adopt_existing,
+            "placement": placement,
+        },
+        "roles": role_entries,
+        "channels": sorted(channel_entries, key=lambda entry: entry["source_index"]),
+        "extras": {
+            "roles": extra_roles,
+            "channels": extra_channels,
+        },
+        "conflicts": conflicts,
+        "warnings": warnings,
+        "approval": {
+            "apply": apply_code,
+            "rollback": rollback_code,
+        },
+        "summary": {
+            "roles_create": _count_action(role_entries, "create"),
+            "roles_reuse": _count_actions(role_entries, {"reuse", "map"}),
+            "roles_managed": _count_action(role_entries, "managed"),
+            "channels_create": _count_action(channel_entries, "create"),
+            "channels_reuse": _count_action(channel_entries, "reuse"),
+            "channels_managed": _count_action(channel_entries, "managed"),
+            "extra_roles_preserved": len(extra_roles),
+            "extra_channels_preserved": len(extra_channels),
+            "conflicts": len(conflicts),
+            "warnings": len(warnings),
+        },
+    }
+
+
+def role_payload(role: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": str(role.get("name", "new role"))[:100],
+        "permissions": str(_int_or(role.get("permissions"), 0)),
+        "color": max(0, _int_or(role.get("color"), 0)),
+        "hoist": bool(role.get("hoist", False)),
+        "mentionable": bool(role.get("mentionable", False)),
+    }
+    return payload
+
+
+def channel_payload(
+    channel: dict[str, Any],
+    *,
+    role_map: dict[str, str],
+    channel_map: dict[str, str],
+    include_type: bool,
+) -> tuple[dict[str, Any], list[str

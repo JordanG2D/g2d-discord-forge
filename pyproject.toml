@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "g2d-discord-forge"
+version = "1.0.0"
+description = "Deterministic Discord template provisioner for applying a server template to an existing guild."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Gen 2 Dynamics" }]
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+guild-forge = "guild_forge.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

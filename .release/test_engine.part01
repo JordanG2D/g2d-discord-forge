@@ -1,0 +1,91 @@
+e AssertionError(f"Unexpected GET {path}")
+
+
+class InviteURLTests(unittest.TestCase):
+    def test_invite_url_uses_current_application_endpoint(self) -> None:
+        fake = FakeApplicationAPI()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            settings = Settings(
+                bot_token="private-test-token",
+                application_id=None,
+                target_guild_id="999",
+                template_ref="https://discord.new/AbCdEf123456",
+                template_code="AbCdEf123456",
+                state_dir=state_dir,
+                state_file=state_dir / "state.json",
+                plan_file=state_dir / "plan.json",
+                placement="top",
+                adopt_existing=True,
+                require_admin=True,
+                api_base="https://discord.com/api/v10",
+                request_timeout=1.0,
+                audit_reason="test",
+            )
+
+            with patch("guild_forge.engine.make_api", return_value=fake):
+                url = generate_invite_url(settings)
+
+            self.assertEqual(fake.paths, ["/applications/@me"])
+            self.assertIn("client_id=424242", url)
+            self.assertIn("permissions=8", url)
+            self.assertIn("scope=bot", url)
+            self.assertIn("guild_id=999", url)
+
+
+
+class EngineLifecycleTests(unittest.TestCase):
+    def test_apply_verify_rollback_lifecycle(self) -> None:
+        fake = FakeDiscordAPI()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            settings = Settings(
+                bot_token="private-test-token",
+                application_id="201",
+                target_guild_id="999",
+                template_ref="https://discord.new/AbCdEf123456",
+                template_code="AbCdEf123456",
+                state_dir=state_dir,
+                state_file=state_dir / "state.json",
+                plan_file=state_dir / "plan.json",
+                placement="top",
+                adopt_existing=True,
+                require_admin=True,
+                api_base="https://discord.com/api/v10",
+                request_timeout=1.0,
+                audit_reason="test",
+            )
+
+            apply_code = approval_code("APPLY", settings.template_code, "999")
+            rollback_code = approval_code("ROLLBACK", settings.template_code, "999")
+
+            with patch("guild_forge.engine.make_api", return_value=fake):
+                result = apply(settings, confirmation=apply_code)
+                self.assertEqual(result["run"]["status"], "succeeded")
+                self.assertEqual(len(result["run"]["created_roles"]), 1)
+                self.assertEqual(len(result["run"]["created_channels"]), 1)
+                self.assertTrue(settings.state_file.exists())
+
+                verification = verify(settings)
+                self.assertTrue(verification["ok"], verification["drift"])
+
+                # A second apply must converge existing Forge-owned resources rather than duplicate them.
+                second = apply(settings, confirmation=apply_code)
+                self.assertEqual(len(second["run"]["created_roles"]), 0)
+                self.assertEqual(len(second["run"]["created_channels"]), 0)
+                self.assertEqual(len([role for role in fake.roles if role["name"] == "Admin"]), 1)
+                self.assertEqual(len([channel for channel in fake.channels if channel["name"] == "voice"]), 1)
+
+                rolled_back = rollback(settings, confirmation=rollback_code)
+                self.assertEqual(len(rolled_back["deleted_roles"]), 1)
+                self.assertEqual(len(rolled_back["deleted_channels"]), 1)
+                self.assertFalse(settings.state_file.exists())
+                self.assertIsNotNone(rolled_back["archived_state"])
+
+                self.assertFalse(any(role["name"] == "Admin" for role in fake.roles))
+                self.assertFalse(any(channel["name"] == "voice" for channel in fake.channels))
+                self.assertTrue(any(channel["name"] == "preexisting" for channel in fake.channels))
+
+
+if __name__ == "__main__":
+    unittest.main()

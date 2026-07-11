@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from guild_forge.config import parse_template_code
+from guild_forge.core import (
+    approval_code,
+    build_plan,
+    channel_creation_order,
+    channel_payload,
+    map_permission_overwrites,
+    role_sort_top_to_bottom,
+    source_channels,
+    source_roles,
+)
+from guild_forge.state import initial_state, load_json, save_json_atomic, validate_state_binding
+
+
+TEMPLATE = {
+    "code": "AbCdEf123456",
+    "name": "G2D Workspace",
+    "updated_at": "2026-07-10T00:00:00+00:00",
+    "source_guild_id": "123",
+    "serialized_source_guild": {
+        "name": "Source Workspace",
+        "roles": [
+            {
+                "id": 0,
+                "name": "@everyone",
+                "position": 0,
+                "permissions": "1024",
+                "color": 0,
+                "hoist": False,
+                "mentionable": False,
+            },
+            {
+                "id": 2,
+                "name": "Member",
+                "position": 1,
+                "permissions": "2048",
+                "color": 0,
+                "hoist": False,
+                "mentionable": True,
+            },
+            {
+                "id": 1,
+                "name": "Admin",
+                "position": 2,
+                "permissions": "8",
+                "color": 123,
+                "hoist": True,
+                "mentionable": False,
+            },
+        ],
+        "channels": [
+            {
+                "id": 10,
+                "name": "WORK",
+                "type": 4,
+                "position": 0,
+                "parent_id": None,
+                "permission_overwrites": [],
+            },
+            {
+                "id": 11,
+                "name": "general",
+                "type": 0,
+                "position": 0,
+                "parent_id": 10,
+                "topic": "General work",
+                "nsfw": False,
+                "rate_limit_per_user": 0,
+                "permission_overwrites": [
+                    {"id": 0, "type": 0, "allow": "1024", "deny": "0"},
+                    {"id": 2, "type": 0, "allow": "2048", "deny": "0"},
+                ],
+            },
+            {
+                "id": 12,
+                "name": "voice",
+                "type": 2,
+                "position": 1,
+                "parent_id": 10,
+                "bitrate": 128000,
+                "user_limit": 5,
+                "permission_overwrites": [],
+            },
+        ],
+    },
+}
+
+TARGET_GUILD = {"id": "999", "name": "Target Workspace"}
+TARGET_ROLES = [
+    {
+        "id": "999",
+        "name": "@everyone",
+        "position": 0,
+        "permissions": "1024",
+        "managed": False,
+    },
+    {
+        "id": "200",
+        "name": "Member",
+        "position": 1,
+        "permissions": "2048",
+        "managed": False,
+    },
+    {
+        "id": "201",
+        "name": "Forge Bot",
+        "position": 2,
+        "permissions": "8",
+        "managed": True,
+    },
+]
+TARGET_CHANNELS = [
+    {"id": "300", "name": "WORK", "type": 4, "position": 0, "parent_id": None},
+    {"id": "301", "name": "general", "type": 0, "position": 0, "parent_id": "300"},
+    {"id": "302", "name": "preexisting", "type": 0, "position": 1, "parent_id": None},
+]
+
+
+class ConfigTests(unittest.TestCase):
+    def test_template_code_parsing(self) -> None:
+        self.assertEqual(parse_template_code("AbCdEf123456"), "AbCdEf123456")
+        self.assertEqual(
+            parse_template_code("https://discord.new/AbCdEf123456"),
+            "AbCdEf123456",
+        )
+        self.assertEqual(
+            parse_template_code("https://discord.com/template/AbCdEf123456?x=1"),
+            "AbCdEf123456",
+        )
+
+    def test_invalid_template_reference(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_template_code("https://example.com/nope")
+
+
+class PlanTests(unittest.TestCase):
+    def test_safe_reuse_and_create_plan(self) -> None:
+        plan = build_plan(
+            template=TEMPLATE,
+            guild=TARGET_GUILD,
+            target_roles=TARGET_ROLES,
+            target_channels=TARGET_CHANNELS,
+            state=None,
+            adopt_existing=True,
+            placement="top",
+        )
+        role_actions = {entry["name"]: entry["action"] for entry in plan["roles"]}
+        channel_actions = {entry["name"]: entry["action"] for entry in plan["channels"]}
+
+        self.assertEqual(role_actions["@everyone"], 

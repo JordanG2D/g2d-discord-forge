@@ -1,0 +1,96 @@
+         role_entries.append(entry)
+            continue
+
+        prior = state_roles.get(source_id)
+        if isinstance(prior, dict):
+            target_id = sid(prior.get("target_id"))
+            target = target_roles_by_id.get(target_id)
+            if target is not None:
+                if target.get("managed"):
+                    conflicts.append(
+                        f"Role '{name}' is mapped to a Discord-managed role ({target_id}); it cannot be managed or adopted."
+                    )
+                    entry.update(action="conflict", target_id=target_id, owned=False, reason="managed role")
+                else:
+                    owned = bool(prior.get("owned", False))
+                    entry.update(
+                        action="managed" if owned else "reuse",
+                        target_id=target_id,
+                        owned=owned,
+                        reason="state mapping",
+                    )
+                    if target.get("name") != name:
+                        if owned:
+                            warnings.append(
+                                f"Managed role {target_id} drifted from '{name}' to '{target.get('name')}' and will be restored."
+                            )
+                        else:
+                            warnings.append(
+                                f"Adopted role {target_id} is now named '{target.get('name')}', not '{name}'; it will be preserved."
+                            )
+                    if not owned:
+                        differences = _role_setting_differences(role, target)
+                        if differences:
+                            warnings.append(
+                                f"Adopted role '{name}' differs from the template in "
+                                + ", ".join(differences)
+                                + "; those preexisting settings will be preserved."
+                            )
+                    role_resolution[source_id] = target_id
+                    used_role_ids.add(target_id)
+                role_entries.append(entry)
+                continue
+            warnings.append(f"State mapping for role '{name}' points to missing role {target_id}; it will be recreated.")
+
+        candidates = [
+            target
+            for target in target_roles
+            if sid(target.get("id")) not in used_role_ids
+            and not target.get("managed", False)
+            and target.get("name") == name
+            and sid(target.get("id")) != guild_id
+        ]
+        if adopt_existing and len(candidates) == 1:
+            target = candidates[0]
+            target_id = sid(target["id"])
+            entry.update(action="reuse", target_id=target_id, owned=False, reason="exact role-name match")
+            role_resolution[source_id] = target_id
+            used_role_ids.add(target_id)
+            differences = _role_setting_differences(role, target)
+            if differences:
+                warnings.append(
+                    f"Adopted role '{name}' differs from the template in "
+                    + ", ".join(differences)
+                    + "; those preexisting settings will be preserved."
+                )
+        elif adopt_existing and len(candidates) > 1:
+            conflicts.append(
+                f"Role '{name}' has {len(candidates)} exact matches in the target server; Forge will not guess."
+            )
+            entry.update(action="conflict", target_id=None, owned=False, reason="ambiguous exact matches")
+            role_resolution[source_id] = None
+        else:
+            entry.update(action="create", target_id=None, owned=True, reason="missing from target")
+            role_resolution[source_id] = None
+        role_entries.append(entry)
+
+    channel_entries: list[dict[str, Any]] = []
+    channel_resolution: dict[str, str | None] = {}
+    sources = source_channels(template)
+    source_by_id = {channel["_source_id"]: channel for channel in sources}
+
+    # Categories first so child matching can use an adopted or managed parent.
+    ordered = sorted(
+        sources,
+        key=lambda channel: (
+            0 if _int_or(channel.get("type"), -1) == 4 else 1,
+            _int_or(channel.get("_source_position"), 0),
+            _int_or(channel.get("_source_index"), 0),
+        ),
+    )
+
+    for channel in ordered:
+        source_id = channel["_source_id"]
+        name = str(channel.get("name", "unnamed-channel"))
+        channel_type = _int_or(channel.get("type"), -1)
+        parent_so

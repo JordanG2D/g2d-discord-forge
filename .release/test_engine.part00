@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from copy import deepcopy
+from pathlib import Path
+from unittest.mock import patch
+
+from guild_forge.config import Settings
+from guild_forge.core import approval_code
+from guild_forge.engine import apply, generate_invite_url, rollback, verify
+
+from test_core import TARGET_CHANNELS, TARGET_GUILD, TARGET_ROLES, TEMPLATE
+
+
+class FakeDiscordAPI:
+    def __init__(self) -> None:
+        self.template = deepcopy(TEMPLATE)
+        self.guild = deepcopy(TARGET_GUILD)
+        self.roles = deepcopy(TARGET_ROLES)
+        self.channels = deepcopy(TARGET_CHANNELS)
+        self.bot_user = {"id": "777"}
+        self.bot_member = {"roles": ["201"]}
+        self.next_role = 500
+        self.next_channel = 600
+
+    def get(self, path: str, *, auth: bool = True):
+        if path == "/guilds/templates/AbCdEf123456":
+            return deepcopy(self.template)
+        if path == "/guilds/999":
+            return deepcopy(self.guild)
+        if path == "/guilds/999/roles":
+            return deepcopy(self.roles)
+        if path == "/guilds/999/channels":
+            return deepcopy(self.channels)
+        if path == "/users/@me":
+            return deepcopy(self.bot_user)
+        if path == "/guilds/999/members/777":
+            return deepcopy(self.bot_member)
+        raise AssertionError(f"Unexpected GET {path}")
+
+    def post(self, path: str, payload):
+        if path == "/guilds/999/roles":
+            for existing in self.roles:
+                if int(existing.get("position", 0)) >= 1:
+                    existing["position"] = int(existing.get("position", 0)) + 1
+            role = {
+                "id": str(self.next_role),
+                "position": 1,
+                "managed": False,
+                **deepcopy(payload),
+            }
+            self.next_role += 1
+            self.roles.append(role)
+            return deepcopy(role)
+        if path == "/guilds/999/channels":
+            channel = {
+                "id": str(self.next_channel),
+                "position": len(self.channels),
+                **deepcopy(payload),
+            }
+            self.next_channel += 1
+            self.channels.append(channel)
+            return deepcopy(channel)
+        raise AssertionError(f"Unexpected POST {path}")
+
+    def patch(self, path: str, payload):
+        if path == "/guilds/999/roles":
+            by_id = {item["id"]: item for item in self.roles}
+            for change in payload:
+                if change["id"] in by_id:
+                    by_id[change["id"]]["position"] = change["position"]
+            return deepcopy(self.roles)
+        if path.startswith("/guilds/999/roles/"):
+            role_id = path.rsplit("/", 1)[-1]
+            role = next(item for item in self.roles if item["id"] == role_id)
+            role.update(deepcopy(payload))
+            return deepcopy(role)
+        if path == "/guilds/999/channels":
+            by_id = {item["id"]: item for item in self.channels}
+            for change in payload:
+                channel = by_id.get(change["id"])
+                if channel is None:
+                    continue
+                if "position" in change:
+                    channel["position"] = change["position"]
+                if "parent_id" in change:
+                    channel["parent_id"] = change["parent_id"]
+            return deepcopy(self.channels)
+        if path.startswith("/channels/"):
+            channel_id = path.rsplit("/", 1)[-1]
+            channel = next(item for item in self.channels if item["id"] == channel_id)
+            channel.update(deepcopy(payload))
+            return deepcopy(channel)
+        raise AssertionError(f"Unexpected PATCH {path}")
+
+    def delete(self, path: str, *, auth: bool = True):
+        if path.startswith("/channels/"):
+            channel_id = path.rsplit("/", 1)[-1]
+            self.channels = [item for item in self.channels if item["id"] != channel_id]
+            return None
+        if path.startswith("/guilds/999/roles/"):
+            role_id = path.rsplit("/", 1)[-1]
+            self.roles = [item for item in self.roles if item["id"] != role_id]
+            return None
+        raise AssertionError(f"Unexpected DELETE {path}")
+
+
+class FakeApplicationAPI:
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+
+    def get(self, path: str, *, auth: bool = True):
+        self.paths.append(path)
+        if path == "/applications/@me":
+            return {"id": "424242"}
+        rais

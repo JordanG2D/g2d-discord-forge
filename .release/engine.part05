@@ -1,0 +1,121 @@
+ist[dict[str, Any]] = []
+    deleted_roles: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    owned_channels: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
+    for source_id, mapping in state.get("channels", {}).items():
+        if not isinstance(mapping, dict) or not mapping.get("owned", False):
+            continue
+        target_id = sid(mapping.get("target_id"))
+        owned_channels.append((target_id, mapping, channel_by_id.get(target_id)))
+    owned_channels.sort(
+        key=lambda item: (
+            1 if item[2] and int(item[2].get("type", -1)) == 4 else 0,
+            -int(item[1].get("created_sequence", 0)),
+        )
+    )
+
+    for target_id, mapping, current in owned_channels:
+        if current is None:
+            warnings.append(f"Owned channel {target_id} was already missing.")
+            continue
+        try:
+            api.delete(f"/channels/{target_id}")
+            deleted_channels.append({"id": target_id, "name": current.get("name")})
+        except DiscordAPIError as exc:
+            if exc.status == 404:
+                warnings.append(f"Owned channel {target_id} disappeared during rollback.")
+            else:
+                raise
+
+    owned_roles: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
+    for source_id, mapping in state.get("roles", {}).items():
+        if not isinstance(mapping, dict) or not mapping.get("owned", False):
+            continue
+        target_id = sid(mapping.get("target_id"))
+        owned_roles.append((target_id, mapping, role_by_id.get(target_id)))
+    owned_roles.sort(key=lambda item: -int(item[1].get("created_sequence", 0)))
+
+    for target_id, mapping, current in owned_roles:
+        if current is None:
+            warnings.append(f"Owned role {target_id} was already missing.")
+            continue
+        try:
+            api.delete(f"/guilds/{guild_id}/roles/{target_id}")
+            deleted_roles.append({"id": target_id, "name": current.get("name")})
+        except DiscordAPIError as exc:
+            if exc.status == 404:
+                warnings.append(f"Owned role {target_id} disappeared during rollback.")
+            else:
+                raise
+
+    _restore_baseline_role_positions(api, guild_id, state, warnings)
+    _restore_baseline_channel_positions(api, guild_id, state, warnings)
+    archived = archive_state(settings.state_file)
+
+    return {
+        "preflight": preflight,
+        "deleted_channels": deleted_channels,
+        "deleted_roles": deleted_roles,
+        "warnings": warnings,
+        "archived_state": archived,
+    }
+
+
+def _state_mapping(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target_id": sid(entry["target_id"]),
+        "owned": bool(entry.get("owned", False)),
+        "name": entry.get("name"),
+        "source_position": entry.get("source_position"),
+        "source_index": entry.get("source_index"),
+        "type": entry.get("type"),
+        "parent_source_id": entry.get("parent_source_id"),
+    }
+
+
+def _next_creation_sequence(state: dict[str, Any]) -> int:
+    values: list[int] = []
+    for group in (state.get("roles", {}), state.get("channels", {})):
+        if not isinstance(group, dict):
+            continue
+        for mapping in group.values():
+            if isinstance(mapping, dict):
+                try:
+                    values.append(int(mapping.get("created_sequence", 0)))
+                except (TypeError, ValueError):
+                    pass
+    return max(values, default=0) + 1
+
+
+def _assert_bot_above_mapped_roles(
+    plan: dict[str, Any],
+    target_roles: list[dict[str, Any]],
+    highest_bot_position: int,
+    guild_id: str,
+) -> None:
+    role_by_id = {sid(role.get("id")): role for role in target_roles}
+    blocked: list[str] = []
+    for entry in plan.get("roles", []):
+        target_id = entry.get("target_id")
+        if target_id is None or sid(target_id) == sid(guild_id):
+            continue
+        target = role_by_id.get(sid(target_id))
+        if target is None:
+            continue
+        if int(target.get("position", 0)) >= highest_bot_position:
+            blocked.append(str(target.get("name") or target_id))
+    if blocked:
+        raise ForgeError(
+            "Move the Forge bot role above these mapped target roles before apply: "
+            + ", ".join(blocked)
+        )
+
+
+def _place_template_roles_below_bot(
+    api: DiscordAPI,
+    guild_id: str,
+    role_sources: dict[str, dict[str, Any]],
+    state: dict[str, Any],
+) -> None:
+    m

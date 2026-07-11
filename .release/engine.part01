@@ -1,0 +1,121 @@
+opt_existing,
+        placement=settings.placement,
+    )
+    if save:
+        settings.plan_file.parent.mkdir(parents=True, exist_ok=True)
+        save_json_atomic(settings.plan_file, plan)
+    return plan
+
+
+def preflight_permissions(
+    api: DiscordAPI,
+    *,
+    guild_id: str,
+    roles: list[dict[str, Any]],
+    require_admin: bool,
+) -> dict[str, Any]:
+    bot_user = api.get("/users/@me")
+    if not isinstance(bot_user, dict) or not bot_user.get("id"):
+        raise ForgeError("Discord did not return the bot user ID.")
+    member = api.get(f"/guilds/{guild_id}/members/{bot_user['id']}")
+    if not isinstance(member, dict):
+        raise ForgeError("Discord did not return the bot's target-server member record.")
+    permissions = effective_guild_permissions(guild_id, member.get("roles", []), roles)
+    allowed, missing = has_required_permissions(permissions, require_admin)
+    if not allowed:
+        raise ForgeError(
+            "The bot is missing required target-server permissions: " + ", ".join(missing) + ". "
+            "Move its role above the roles it must create/manage and grant temporary Administrator access."
+        )
+
+    role_by_id = {sid(role.get("id")): role for role in roles}
+    member_roles = [role_by_id.get(sid(role_id)) for role_id in member.get("roles", [])]
+    highest = max((int(role.get("position", 0)) for role in member_roles if role), default=0)
+    return {
+        "permissions": permissions,
+        "administrator": bool(permissions & (1 << 3)),
+        "highest_role_position": highest,
+    }
+
+
+def apply(settings: Settings, *, confirmation: str) -> dict[str, Any]:
+    guild_id = settings.require_guild_id()
+    settings.require_token()
+    api = make_api(settings)
+
+    template = fetch_template(api, settings.template_code)
+    guild, target_roles, target_channels = fetch_target_snapshot(api, guild_id)
+    state = load_json(settings.state_file)
+    validate_state_binding(state, template_code=settings.template_code, guild_id=guild_id)
+
+    plan = build_plan(
+        template=template,
+        guild=guild,
+        target_roles=target_roles,
+        target_channels=target_channels,
+        state=state,
+        adopt_existing=settings.adopt_existing,
+        placement=settings.placement,
+    )
+    settings.plan_file.parent.mkdir(parents=True, exist_ok=True)
+    save_json_atomic(settings.plan_file, plan)
+
+    if plan["conflicts"]:
+        details = "\n".join(f"- {item}" for item in plan["conflicts"])
+        raise ForgeError(f"Apply blocked by {len(plan['conflicts'])} conflict(s):\n{details}")
+
+    expected_confirmation = plan["approval"]["apply"]
+    if confirmation != expected_confirmation:
+        raise ForgeError(
+            f"Confirmation mismatch. Run plan and pass exactly: --confirm {expected_confirmation}"
+        )
+
+    preflight = preflight_permissions(
+        api,
+        guild_id=guild_id,
+        roles=target_roles,
+        require_admin=settings.require_admin,
+    )
+    _assert_bot_above_mapped_roles(plan, target_roles, preflight["highest_role_position"], guild_id)
+
+    if state is None:
+        state = initial_state(settings.template_code, guild_id)
+    state.setdefault("roles", {})
+    state.setdefault("channels", {})
+    state.setdefault("runs", [])
+    state.setdefault("baseline", {})
+
+    if not state["baseline"].get("roles"):
+        state["baseline"]["roles"] = {
+            sid(role.get("id")): {
+                "position": int(role.get("position", 0)),
+                "managed": bool(role.get("managed", False)),
+                "name": role.get("name"),
+            }
+            for role in target_roles
+        }
+
+    if not state["baseline"].get("channels"):
+        state["baseline"]["channels"] = {
+            sid(channel.get("id")): {
+                "position": int(channel.get("position", 0)),
+                "parent_id": None if channel.get("parent_id") is None else sid(channel.get("parent_id")),
+                "type": int(channel.get("type", -1)),
+            }
+            for channel in target_channels
+        }
+
+    run = {
+        "started_at": utc_now(),
+        "finished_at": None,
+        "status": "running",
+        "template_updated_at": template.get("updated_at"),
+        "created_roles": [],
+        "updated_roles": [],
+        "created_channels": [],
+        "updated_channels": [],
+        "warnings": list(plan.get("warnings", [])),
+    }
+    state["runs"].append(run)
+    state["updated_at"] = utc_now()
+    save_json_atomic(settings.state_file, st

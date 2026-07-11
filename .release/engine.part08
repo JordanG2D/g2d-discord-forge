@@ -1,0 +1,12 @@
+ int(item.get("position", 0)),
+        }
+        if int(item.get("type", -1)) != 4:
+            entry["parent_id"] = item.get("parent_id")
+            entry["lock_permissions"] = False
+        payload.append(entry)
+    if payload:
+        api.patch(f"/guilds/{guild_id}/channels", payload)
+
+
+def _rollback_code(template_code: str, guild_id: str) -> str:
+    return approval_code("ROLLBACK", template_code, guild_id)

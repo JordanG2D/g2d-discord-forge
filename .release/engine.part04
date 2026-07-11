@@ -1,0 +1,103 @@
+expected[key]!r}, got {actual!r}."
+                    )
+        elif target.get("name") != role.get("name"):
+            warnings.append(
+                f"Adopted role {target_id} is named '{target.get('name')}', not template name '{role.get('name')}'."
+            )
+
+    ordered_template_roles = [
+        role for role in role_sort_bottom_to_top(source_roles(template)) if not is_everyone_role(role)
+    ]
+    mapped_positions: list[tuple[str, int]] = []
+    for role in ordered_template_roles:
+        target_id = role_map.get(role["_source_id"])
+        target = role_by_id.get(target_id) if target_id is not None else None
+        if target is not None:
+            mapped_positions.append((str(role.get("name")), int(target.get("position", 0))))
+    for lower, higher in zip(mapped_positions, mapped_positions[1:]):
+        if lower[1] >= higher[1]:
+            drift.append(
+                f"Template role hierarchy drifted: '{higher[0]}' must be above '{lower[0]}'."
+            )
+
+    for channel in source_channels(template):
+        source_id = channel["_source_id"]
+        mapping = state.get("channels", {}).get(source_id)
+        if not isinstance(mapping, dict) or not mapping.get("target_id"):
+            drift.append(f"Channel '{channel.get('name')}' has no state mapping.")
+            continue
+        target_id = sid(mapping["target_id"])
+        target = channel_by_id.get(target_id)
+        if target is None:
+            drift.append(f"Channel '{channel.get('name')}' ({target_id}) is missing.")
+            continue
+        if int(target.get("type", -1)) != int(channel.get("type", -1)):
+            drift.append(
+                f"Channel '{channel.get('name')}' type drifted: expected {channel_type_name(channel.get('type'))}, "
+                f"got {channel_type_name(target.get('type'))}."
+            )
+            continue
+
+        expected_parent = None
+        parent_source_id = channel.get("_parent_source_id")
+        if parent_source_id is not None:
+            expected_parent = channel_map.get(sid(parent_source_id))
+        actual_parent = None if target.get("parent_id") is None else sid(target.get("parent_id"))
+
+        if mapping.get("owned", False):
+            try:
+                expected, payload_warnings = channel_payload(
+                    channel,
+                    role_map=role_map,
+                    channel_map=channel_map,
+                    include_type=False,
+                )
+                warnings.extend(payload_warnings)
+            except ValueError as exc:
+                drift.append(f"Channel '{channel.get('name')}' cannot be verified: {exc}")
+                continue
+            _compare_owned_channel(channel.get("name"), expected, target, drift)
+        else:
+            if target.get("name") != channel.get("name"):
+                warnings.append(
+                    f"Adopted channel {target_id} is named '{target.get('name')}', not template name '{channel.get('name')}'."
+                )
+            if actual_parent != expected_parent:
+                warnings.append(
+                    f"Adopted channel '{target.get('name')}' is not under its template parent; Forge preserves adopted content."
+                )
+
+    return {
+        "target": {"id": guild_id, "name": guild.get("name")},
+        "template": template_summary(template),
+        "state_file": settings.state_file,
+        "drift": drift,
+        "warnings": warnings,
+        "ok": not drift,
+    }
+
+
+def rollback(settings: Settings, *, confirmation: str) -> dict[str, Any]:
+    guild_id = settings.require_guild_id()
+    settings.require_token()
+    state = load_json(settings.state_file)
+    if state is None:
+        raise ForgeError(f"No Forge state exists at {settings.state_file}; nothing to roll back.")
+    validate_state_binding(state, template_code=settings.template_code, guild_id=guild_id)
+
+    expected = _rollback_code(settings.template_code, guild_id)
+    if confirmation != expected:
+        raise ForgeError(f"Confirmation mismatch. Pass exactly: --confirm {expected}")
+
+    api = make_api(settings)
+    _, target_roles, target_channels = fetch_target_snapshot(api, guild_id)
+    preflight = preflight_permissions(
+        api,
+        guild_id=guild_id,
+        roles=target_roles,
+        require_admin=settings.require_admin,
+    )
+    channel_by_id = {sid(channel.get("id")): channel for channel in target_channels}
+    role_by_id = {sid(role.get("id")): role for role in target_roles}
+
+    deleted_channels: l

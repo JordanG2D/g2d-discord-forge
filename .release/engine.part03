@@ -1,0 +1,106 @@
+ = target_id
+                entry.update(target_id=target_id, action="managed", owned=True)
+                state["channels"][source_id] = {
+                    **_state_mapping(entry),
+                    "created_at": utc_now(),
+                    "created_sequence": creation_sequence,
+                }
+                creation_sequence += 1
+                run["created_channels"].append(
+                    {"id": target_id, "name": channel.get("name"), "type": channel.get("type")}
+                )
+                save_json_atomic(settings.state_file, state)
+            elif entry["action"] == "managed" and entry.get("owned"):
+                target_id = sid(entry["target_id"])
+                payload, payload_warnings = channel_payload(
+                    channel,
+                    role_map=role_map,
+                    channel_map=channel_map,
+                    include_type=False,
+                )
+                run["warnings"].extend(payload_warnings)
+                updated = api.patch(f"/channels/{target_id}", payload)
+                if not isinstance(updated, dict):
+                    raise ForgeError(f"Discord did not return the updated channel '{channel.get('name')}'.")
+                run["updated_channels"].append({"id": target_id, "name": channel.get("name")})
+
+        if settings.placement == "top":
+            _place_template_channels_at_top(
+                api,
+                guild_id=guild_id,
+                channels=list(channel_sources.values()),
+                channel_map=channel_map,
+            )
+
+        state["template_updated_at"] = template.get("updated_at")
+        state["last_apply_at"] = utc_now()
+        state["updated_at"] = utc_now()
+        run["status"] = "succeeded"
+        run["finished_at"] = utc_now()
+        save_json_atomic(settings.state_file, state)
+
+        return {
+            "plan": plan,
+            "state_file": settings.state_file,
+            "preflight": preflight,
+            "run": run,
+        }
+    except Exception as exc:
+        run["status"] = "failed"
+        run["finished_at"] = utc_now()
+        run["error"] = str(exc)
+        state["updated_at"] = utc_now()
+        save_json_atomic(settings.state_file, state)
+        raise
+
+
+def verify(settings: Settings) -> dict[str, Any]:
+    guild_id = settings.require_guild_id()
+    settings.require_token()
+    state = load_json(settings.state_file)
+    if state is None:
+        raise ForgeError(f"No Forge state exists at {settings.state_file}; run apply first.")
+    validate_state_binding(state, template_code=settings.template_code, guild_id=guild_id)
+
+    api = make_api(settings)
+    template = fetch_template(api, settings.template_code)
+    guild, target_roles, target_channels = fetch_target_snapshot(api, guild_id)
+    role_by_id = {sid(role.get("id")): role for role in target_roles}
+    channel_by_id = {sid(channel.get("id")): channel for channel in target_channels}
+    role_map = {
+        source_id: sid(mapping["target_id"])
+        for source_id, mapping in state.get("roles", {}).items()
+        if isinstance(mapping, dict) and mapping.get("target_id") is not None
+    }
+    channel_map = {
+        source_id: sid(mapping["target_id"])
+        for source_id, mapping in state.get("channels", {}).items()
+        if isinstance(mapping, dict) and mapping.get("target_id") is not None
+    }
+
+    drift: list[str] = []
+    warnings: list[str] = []
+
+    for role in source_roles(template):
+        source_id = role["_source_id"]
+        if is_everyone_role(role):
+            role_map[source_id] = guild_id
+            continue
+        mapping = state.get("roles", {}).get(source_id)
+        if not isinstance(mapping, dict) or not mapping.get("target_id"):
+            drift.append(f"Role '{role.get('name')}' has no state mapping.")
+            continue
+        target_id = sid(mapping["target_id"])
+        target = role_by_id.get(target_id)
+        if target is None:
+            drift.append(f"Role '{role.get('name')}' ({target_id}) is missing.")
+            continue
+        if mapping.get("owned", False):
+            expected = role_payload(role)
+            for key in ("name", "permissions", "color", "hoist", "mentionable"):
+                actual = target.get(key)
+                if key == "permissions":
+                    actual = str(actual)
+                if actual != expected[key]:
+                    drift.append(
+                        f"Owned role '{role.get('name')}' field {key} drifted: expected {

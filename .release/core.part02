@@ -1,0 +1,90 @@
+urce_id = channel.get("_parent_source_id")
+        entry = _base_channel_entry(channel)
+
+        if channel_type not in SUPPORTED_CHANNEL_TYPES:
+            conflicts.append(
+                f"Channel '{name}' uses unsupported template channel type {channel_type}."
+            )
+            entry.update(action="conflict", target_id=None, owned=False, reason="unsupported channel type")
+            channel_resolution[source_id] = None
+            channel_entries.append(entry)
+            continue
+
+        expected_parent_target_id = (
+            channel_resolution.get(parent_source_id) if parent_source_id is not None else None
+        )
+
+        prior = state_channels.get(source_id)
+        if isinstance(prior, dict):
+            target_id = sid(prior.get("target_id"))
+            target = target_channels_by_id.get(target_id)
+            if target is not None:
+                target_type = _int_or(target.get("type"), -1)
+                owned = bool(prior.get("owned", False))
+                if target_type != channel_type:
+                    conflicts.append(
+                        f"Channel '{name}' maps to {target_id}, but its type changed from "
+                        f"{channel_type_name(channel_type)} to {channel_type_name(target_type)}."
+                    )
+                    entry.update(action="conflict", target_id=target_id, owned=owned, reason="channel type drift")
+                else:
+                    entry.update(
+                        action="managed" if owned else "reuse",
+                        target_id=target_id,
+                        owned=owned,
+                        reason="state mapping",
+                    )
+                    if target.get("name") != name:
+                        if owned:
+                            warnings.append(
+                                f"Managed channel {target_id} drifted from '{name}' to '{target.get('name')}' and will be restored."
+                            )
+                        else:
+                            warnings.append(
+                                f"Adopted channel {target_id} is now named '{target.get('name')}', not '{name}'; it will be preserved."
+                            )
+                    if (
+                        expected_parent_target_id is not None
+                        and sid(target.get("parent_id")) != expected_parent_target_id
+                    ):
+                        if owned:
+                            warnings.append(
+                                f"Managed channel '{name}' has parent drift and will be moved back under its template category."
+                            )
+                        else:
+                            warnings.append(
+                                f"Adopted channel '{name}' is under a different parent and will not be moved."
+                            )
+                    channel_resolution[source_id] = target_id
+                    used_channel_ids.add(target_id)
+                channel_entries.append(entry)
+                continue
+            warnings.append(
+                f"State mapping for channel '{name}' points to missing channel {target_id}; it will be recreated."
+            )
+
+        # A child whose template parent must be created cannot safely adopt a target channel yet.
+        can_match_parent = parent_source_id is None or expected_parent_target_id is not None
+        candidates: list[dict[str, Any]] = []
+        if adopt_existing and can_match_parent:
+            for target in target_channels:
+                target_id = sid(target.get("id"))
+                if target_id in used_channel_ids:
+                    continue
+                if target.get("name") != name:
+                    continue
+                if _int_or(target.get("type"), -1) != channel_type:
+                    continue
+                target_parent = target.get("parent_id")
+                target_parent_id = None if target_parent is None else sid(target_parent)
+                if target_parent_id != expected_parent_target_id:
+                    continue
+                candidates.append(target)
+
+        if adopt_existing and len(candidates) == 1:
+            target_id = sid(candidates[0]["id"])
+            entry.update(action="reuse", target_id=target_id, owned=False, reason="exact channel/type/parent match")
+            channel_resolution[source_id] = target_id
+            used_channel_ids.add(target_id)
+        elif adopt_existing and len(candidates) > 1:
+            par

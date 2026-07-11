@@ -1,0 +1,127 @@
+apped: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    for role in role_sort_bottom_to_top(role_sources.values()):
+        if is_everyone_role(role):
+            continue
+
+        mapping = state.get("roles", {}).get(role["_source_id"])
+        if isinstance(mapping, dict) and mapping.get("target_id"):
+            mapped.append((role, mapping))
+
+    if not mapped:
+        return
+
+    current_roles = api.get(f"/guilds/{guild_id}/roles")
+    bot_user = api.get("/users/@me")
+
+    if not isinstance(current_roles, list):
+        raise ForgeError("Discord did not return the target server roles.")
+
+    if not isinstance(bot_user, dict) or not bot_user.get("id"):
+        raise ForgeError("Discord did not return the bot user ID.")
+
+    bot_id = sid(bot_user["id"])
+    member = api.get(f"/guilds/{guild_id}/members/{bot_id}")
+
+    if not isinstance(member, dict):
+        raise ForgeError("Discord did not return the bot's server member record.")
+
+    role_by_id = {
+        sid(role.get("id")): role
+        for role in current_roles
+        if role.get("id") is not None
+    }
+
+    bot_role_ids = {sid(role_id) for role_id in member.get("roles", [])}
+    bot_positions = [
+        int(role_by_id[role_id].get("position", 0))
+        for role_id in bot_role_ids
+        if role_id in role_by_id
+    ]
+    highest_bot_position = max(bot_positions, default=0)
+
+    if highest_bot_position <= 0:
+        raise ForgeError(
+            "Could not determine the Forge bot role position. "
+            "Move the bot role above the roles it must manage."
+        )
+
+    blocked: list[str] = []
+    for source_role, mapping in mapped:
+        target_id = sid(mapping["target_id"])
+        target_role = role_by_id.get(target_id)
+        role_name = str(source_role.get("name") or target_id)
+
+        if target_role is None:
+            raise ForgeError(f"Mapped target role '{role_name}' no longer exists.")
+        if target_id in bot_role_ids:
+            blocked.append(f"{role_name} (Forge bot role)")
+            continue
+        if bool(target_role.get("managed", False)):
+            blocked.append(f"{role_name} (integration-managed)")
+            continue
+        if int(target_role.get("position", 0)) >= highest_bot_position:
+            blocked.append(f"{role_name} (above or equal to Forge)")
+
+    if blocked:
+        raise ForgeError(
+            "Forge cannot reorder these mapped roles: "
+            + ", ".join(blocked)
+            + ". Move Forge above them or disable adoption of managed roles."
+        )
+
+    if highest_bot_position <= len(mapped):
+        raise ForgeError(
+            "There are not enough editable role positions beneath the Forge "
+            "bot role. Move Forge to the top of the role hierarchy and rerun."
+        )
+
+    first_position = highest_bot_position - len(mapped)
+    payload = [
+        {
+            "id": sid(mapping["target_id"]),
+            "position": first_position + offset,
+        }
+        for offset, (_, mapping) in enumerate(mapped)
+    ]
+
+    updated = api.patch(f"/guilds/{guild_id}/roles", payload)
+    if not isinstance(updated, list):
+        raise ForgeError("Discord did not return the updated role hierarchy.")
+
+def _place_template_channels_at_top(
+    api: DiscordAPI,
+    *,
+    guild_id: str,
+    channels: list[dict[str, Any]],
+    channel_map: dict[str, str],
+) -> None:
+    # Parent/category relationships are already applied during channel create/update.
+    # The final bulk pass changes positions only because Discord rejects multiple
+    # parent_id modifications in one request.
+    top_level = sorted(
+        [channel for channel in channels if channel.get("_parent_source_id") is None],
+        key=lambda channel: (
+            int(channel.get("_source_position", 0)),
+            int(channel.get("_source_index", 0)),
+        ),
+    )
+
+    by_parent: dict[str, list[dict[str, Any]]] = {}
+    for channel in channels:
+        parent_source_id = channel.get("_parent_source_id")
+        if parent_source_id is None:
+            continue
+        by_parent.setdefault(sid(parent_source_id), []).append(channel)
+
+    payload: list[dict[str, Any]] = []
+
+    for position, channel in enumerate(top_level):
+        target_id = channel_map.get(channel["_source_id"])
+        if target_id is not None:
+            payload.append({"id": target_id, "position": position})
+
+    for parent_source_id, children in by_parent.items():
+        if channel_map.get(parent_source_id) is None:
+            continue
+        orde
