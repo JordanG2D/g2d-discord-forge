@@ -1,15 +1,16 @@
 name: Publish v1.0.0
 
 on:
-  push:
-    branches: [main]
+  issues:
+    types: [opened]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: github.event.head_commit.message == 'Stage v1.0.0 release'
+    if: github.event_name == 'workflow_dispatch' || github.event.issue.title == 'Publish v1.0.0 release gate'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
